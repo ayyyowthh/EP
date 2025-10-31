@@ -603,11 +603,13 @@ local function endGame()
 	ChaserAbilities.SetGameActive(false)
 
 	-- STEP 1: Reset Map2 escape system FIRST (with error protection)
-	local success, err = pcall(function()
-		Map2EscapeSystem.Reset()
-	end)
-	if not success then
-		warn("⚠️ Map2EscapeSystem.Reset() error (non-critical): " .. tostring(err))
+	if currentMap == "Map2" then
+		local success, err = pcall(function()
+			Map2EscapeSystem.Reset()
+		end)
+		if not success then
+			warn("⚠️ Map2EscapeSystem.Reset() error (non-critical): " .. tostring(err))
+		end
 	end
 
 	print("=== GAME ENDED ===")
@@ -697,6 +699,7 @@ local function endGame()
 		print("✅ Created ServerRoundEnd BindableEvent")
 	end
 	if serverRoundEnd:IsA("BindableEvent") then
+		print("📡 Firing ServerRoundEnd event...")
 		serverRoundEnd:Fire()
 		print("📡 Server-side round end signal sent (ServerRoundEnd)")
 	end
@@ -723,6 +726,26 @@ local function endGame()
 				-- Clear abilities and guns
 				ChaserAbilities.ClearAbilities(player)
 				GunSystem.RemoveGun(player)
+
+				-- If on Map2, explicitly remove Key tool
+				if currentMap == "Map2" then
+					-- Check backpack
+					local backpack = player:FindFirstChild("Backpack")
+					if backpack then
+						local keyTool = backpack:FindFirstChild("Key")
+						if keyTool then
+							keyTool:Destroy()
+							print("🗑️ MainLogic: Removed Key from " .. player.Name .. "'s backpack")
+						end
+					end
+
+					-- Check character
+					local keyInChar = player.Character:FindFirstChild("Key")
+					if keyInChar then
+						keyInChar:Destroy()
+						print("🗑️ MainLogic: Removed Key from " .. player.Name .. "'s character")
+					end
+				end
 
 				-- Reset speed
 				local humanoid = player.Character:FindFirstChild("Humanoid")

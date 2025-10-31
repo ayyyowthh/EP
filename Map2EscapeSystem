@@ -817,6 +817,13 @@ function placeFlare(player)
 	task.spawn(function()
 		for i = FLARE_WAIT_TIME, 1, -1 do
 			task.wait(1)
+
+			-- CRITICAL: Check if map is still active before spawning
+			if not isMap2Active then
+				print("🚁 Helicopter spawn cancelled - round ended.")
+				return
+			end
+
 			if i <= 5 then
 				local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
 				if updateStatusEvent then
