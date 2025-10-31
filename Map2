@@ -415,41 +415,6 @@ end
 
 
 -- NEW: Function to remove key from all players
-local function removeKeyFromAllPlayers()
-	for _, player in ipairs(Players:GetPlayers()) do
-		-- Check character (equipped)
-		if player.Character then
-			local keyTool = player.Character:FindFirstChild("Key")
-			if keyTool then
-				keyTool:Destroy()
-				print("🗑️ Removed key from " .. player.Name .. "'s character")
-			end
-		end
-
-		-- Check backpack (unequipped)
-		local backpack = player:FindFirstChild("Backpack")
-		if backpack then
-			local keyTool = backpack:FindFirstChild("Key")
-			if keyTool then
-				keyTool:Destroy()
-				print("🗑️ Removed key from " .. player.Name .. "'s backpack")
-			end
-		end
-
-		-- Also check StarterGear (in case it got there somehow)
-		local starterGear = player:FindFirstChild("StarterGear")
-		if starterGear then
-			local keyTool = starterGear:FindFirstChild("Key")
-			if keyTool then
-				keyTool:Destroy()
-				print("🗑️ Removed key from " .. player.Name .. "'s StarterGear")
-			end
-		end
-	end
-
-	print("✅ Key removal complete for all players")
-end
-
 -- NEW: Function to reset the entire system
 local function resetSystem()
 	print("🔄 Resetting Chest & Door System...")
@@ -508,9 +473,7 @@ local function setupRoundEndListener()
 
 	if serverRoundEnd and serverRoundEnd:IsA("BindableEvent") then
 		serverRoundEnd.Event:Connect(function()
-			print("📡 Chest System: Received round end signal - resetting...")
-			-- Small delay to let MainLogic finish cleanup first
-			task.wait(0.5)
+			print("📡 Chest System: Received round end signal - resetting immediately...")
 			resetSystem()
 		end)
 		print("✅ Listening for round end signals (ServerRoundEnd)")
@@ -521,23 +484,6 @@ end
 
 -- Initialize system
 createPrompts()
-
--- IMMEDIATE CONNECTION (don't wait for initialization)
-task.spawn(function()
-	task.wait(2) -- Wait for ReplicatedStorage to be ready
-
-	local serverRoundEnd = ReplicatedStorage:WaitForChild("ServerRoundEnd", 30)
-	if serverRoundEnd and serverRoundEnd:IsA("BindableEvent") then
-		serverRoundEnd.Event:Connect(function()
-			print("📡 Chest System: Received round end signal - resetting...")
-			task.wait(0.5)
-			resetSystem()
-		end)
-		print("✅ Chest System: Listening for ServerRoundEnd")
-	else
-		warn("⚠️ Chest System: ServerRoundEnd not found!")
-	end
-end)
 
 -- Initialize door as open at start
 for part, offset in pairs(doorPartOffsets) do

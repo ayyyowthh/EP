@@ -23,6 +23,7 @@ local isMap2Active = false
 local radioIsPowered = false
 local flareIsPlaced = false
 local helicopterIsActive = false
+local helicopterSpawnIsCancelled = false -- ADD THIS: New flag to handle race condition
 local playerBatteryCount = {} -- {[UserId] = count}
 local playersEscaped = {} -- {[UserId] = true}
 local totalBatteriesInRadio = 0 -- ADD THIS LINE: Track total batteries deposited across all players
@@ -798,6 +799,7 @@ function placeFlare(player)
 
 	-- Place flare!
 	flareIsPlaced = true
+	helicopterSpawnIsCancelled = false -- NEW: Allow helicopter to spawn
 
 	print("🔥 " .. player.Name .. " placed the flare!")
 
@@ -818,9 +820,9 @@ function placeFlare(player)
 		for i = FLARE_WAIT_TIME, 1, -1 do
 			task.wait(1)
 
-			-- CRITICAL: Check if map is still active before spawning
-			if not isMap2Active then
-				print("🚁 Helicopter spawn cancelled - round ended.")
+			-- CRITICAL: Check if map is still active OR if spawn was cancelled
+			if not isMap2Active or helicopterSpawnIsCancelled then
+				print("🚁 Helicopter spawn cancelled - round ended or was reset.")
 				return
 			end
 
@@ -832,8 +834,10 @@ function placeFlare(player)
 			end
 		end
 
-		-- Spawn helicopter
-		spawnHelicopter()
+		-- Spawn helicopter (final check)
+		if not helicopterSpawnIsCancelled then
+			spawnHelicopter()
+		end
 	end)
 end
 
@@ -1126,6 +1130,7 @@ function Map2EscapeSystem.Reset()
 	radioIsPowered = false
 	flareIsPlaced = false
 	helicopterIsActive = false
+	helicopterSpawnIsCancelled = true -- NEW: Cancel any pending spawns
 	playerBatteryCount = {}
 	playersEscaped = {}
 	totalBatteriesInRadio = 0
