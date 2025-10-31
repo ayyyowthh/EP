@@ -691,17 +691,14 @@ local function endGame()
 	end
 	
 	-- ✅ STEP 2.5: Fire server-side round end for other systems (Chest & Door, etc.)
-	local serverRoundEnd = ReplicatedStorage:FindFirstChild("ServerRoundEnd")
-	if not serverRoundEnd then
-		serverRoundEnd = Instance.new("BindableEvent")
-		serverRoundEnd.Name = "ServerRoundEnd"
-		serverRoundEnd.Parent = ReplicatedStorage
-		print("✅ Created ServerRoundEnd BindableEvent")
-	end
-	if serverRoundEnd:IsA("BindableEvent") then
-		print("📡 Firing ServerRoundEnd event...")
-		serverRoundEnd:Fire()
-		print("📡 Server-side round end signal sent (ServerRoundEnd)")
+	if currentMap == "Map2" then
+		local resetFunction = ReplicatedStorage:FindFirstChild("ResetMap2Function")
+		if resetFunction then
+			local result = resetFunction:Invoke()
+			print("📦 MainLogic: " .. tostring(result))
+		else
+			warn("⚠️ MainLogic: Could not find ResetMap2Function!")
+		end
 	end
 	
 	-- ✅ STEP 3: Wait for GUI to fully appear and cover screen
@@ -726,26 +723,6 @@ local function endGame()
 				-- Clear abilities and guns
 				ChaserAbilities.ClearAbilities(player)
 				GunSystem.RemoveGun(player)
-
-				-- If on Map2, explicitly remove Key tool
-				if currentMap == "Map2" then
-					-- Check backpack
-					local backpack = player:FindFirstChild("Backpack")
-					if backpack then
-						local keyTool = backpack:FindFirstChild("Key")
-						if keyTool then
-							keyTool:Destroy()
-							print("🗑️ MainLogic: Removed Key from " .. player.Name .. "'s backpack")
-						end
-					end
-
-					-- Check character
-					local keyInChar = player.Character:FindFirstChild("Key")
-					if keyInChar then
-						keyInChar:Destroy()
-						print("🗑️ MainLogic: Removed Key from " .. player.Name .. "'s character")
-					end
-				end
 
 				-- Reset speed
 				local humanoid = player.Character:FindFirstChild("Humanoid")

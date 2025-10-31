@@ -463,23 +463,19 @@ end
 -- Replace the setupRoundEndListener function in your Map2 chest script with this:
 
 -- NEW: Listen for round end signal from MainLogic
-local function setupRoundEndListener()
-	-- Listen for ServerRoundEnd BindableEvent (server-to-server communication)
-	local serverRoundEnd = ReplicatedStorage:FindFirstChild("ServerRoundEnd")
-	if not serverRoundEnd then
-		-- Wait for it to be created by MainLogic
-		serverRoundEnd = ReplicatedStorage:WaitForChild("ServerRoundEnd", 30)
+local function setupResetFunction()
+	-- Use a BindableFunction for a direct, guaranteed call from MainLogic
+	local resetFunction = Instance.new("BindableFunction")
+	resetFunction.Name = "ResetMap2Function"
+	resetFunction.Parent = ReplicatedStorage
+
+	resetFunction.OnInvoke = function()
+		print("🔄 Chest System: Received direct reset call from MainLogic.")
+		resetSystem()
+		return "Map2 reset complete"
 	end
 
-	if serverRoundEnd and serverRoundEnd:IsA("BindableEvent") then
-		serverRoundEnd.Event:Connect(function()
-			print("📡 Chest System: Received round end signal - resetting immediately...")
-			resetSystem()
-		end)
-		print("✅ Listening for round end signals (ServerRoundEnd)")
-	else
-		warn("⚠️ ServerRoundEnd BindableEvent not found!")
-	end
+	print("✅ Chest System: Reset function is ready for direct calls.")
 end
 
 -- Initialize system
@@ -492,8 +488,8 @@ end
 doorIsLocked = false
 bangPrompt.Enabled = false
 
--- Setup round end listener
-setupRoundEndListener()
+-- Setup reset function listener
+setupResetFunction()
 
 -- Painting collision system setup
 local paintingModel = map2ChestFolder:FindFirstChild("Painting")
