@@ -1,0 +1,634 @@
+-- Complete Chest & Door Key System with Chaser Bang Mechanic + Round Reset
+-- Place in ServerScriptService
+
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+print("🎁 Chest & Door System Loading...")
+
+-- Wait for chest folder and model
+local map2ChestFolder = Workspace:WaitForChild("Map2Chest", 10)
+if not map2ChestFolder then
+	warn("❌ Map2Chest folder not found!")
+	return
+end
+
+local chestModel = map2ChestFolder:FindFirstChild("Chest")
+local doorModel = map2ChestFolder:FindFirstChild("Door")
+
+if not chestModel then
+	warn("❌ Chest model not found!")
+	return
+end
+
+if not doorModel then
+	warn("❌ Door model not found!")
+	return
+end
+
+-- Find sound effects
+local doorKnockSound = map2ChestFolder:FindFirstChild("DoorKnock")
+local doorKnockLastSound = map2ChestFolder:FindFirstChild("DoorKnockLast")
+
+if not doorKnockSound then
+	warn("⚠️ DoorKnock sound not found in Map2Chest folder!")
+end
+
+if not doorKnockLastSound then
+	warn("⚠️ DoorKnockLast sound not found in Map2Chest folder!")
+end
+
+-- Find chest parts
+local woodTop = chestModel:FindFirstChild("WoodTop")
+local metalTop = chestModel:FindFirstChild("MetalTop")
+local keyHole = chestModel:FindFirstChild("KeyHole")
+local keyMesh = chestModel:FindFirstChild("Key")
+
+if not woodTop or not metalTop or not keyHole or not keyMesh then
+	warn("❌ Missing chest parts!")
+	return
+end
+
+-- Find door part (we'll use the model's PrimaryPart or first part)
+local doorPart = doorModel:FindFirstChild("Union") or doorModel:FindFirstChildWhichIsA("BasePart")
+if not doorPart then
+	warn("❌ Door part not found!")
+	return
+end
+
+-- Set as PrimaryPart so we can move the whole model
+if not doorModel.PrimaryPart then
+	doorModel.PrimaryPart = doorPart
+end
+
+print("✅ Found all parts:")
+print("   - Chest: WoodTop, MetalTop, KeyHole, Key")
+print("   - Door: " .. doorPart.Name .. " (moving entire Door model)")
+
+-- Store original CFrames for all door parts
+local doorPartOffsets = {}
+local doorModelPivot = doorModel:GetPivot()
+
+for _, part in ipairs(doorModel:GetDescendants()) do
+	if part:IsA("BasePart") then
+		doorPartOffsets[part] = doorModelPivot:Inverse() * part.CFrame
+	end
+end
+
+local partCount = 0
+for _ in pairs(doorPartOffsets) do
+	partCount = partCount + 1
+end
+print("✅ Stored offsets for " .. partCount .. " door parts")
+
+-- Store original CFrames
+local woodTopOriginal = woodTop.CFrame
+local metalTopOriginal = metalTop.CFrame
+local keyHoleOriginal = keyHole.CFrame
+local keyMeshOriginal = keyMesh.CFrame -- NEW: Store key's original position
+
+-- Calculate KeyHole offset relative to WoodTop
+local keyHoleOffset = woodTopOriginal:Inverse() * keyHoleOriginal
+
+-- Tween settings
+local TWEEN_TIME = 0.8
+local OPEN_ROTATION = 90
+
+local tweenInfo = TweenInfo.new(
+	TWEEN_TIME,
+	Enum.EasingStyle.Quad,
+	Enum.EasingDirection.Out
+)
+
+-- Door CFrame positions
+local DOOR_CLOSED_CFRAME = CFrame.new(496.04541, 17.257658, 150.594223, 0.00398987532, 0, 0.999990702, 0, 1, 0, -0.999990165, 0, 0.00399070978)
+local DOOR_OPEN_CFRAME = CFrame.new(492.544128, 17.2141762, 153.051559, 0.956940293, 0, -0.290284723, 0, 1, -0, 0.290284723, 0, 0.956940293)
+
+-- Bang mechanic settings
+local BANG_DURATION = 3
+local BANGS_REQUIRED = 3
+
+-- Track system state
+local chestIsOpen = false
+local keyCollected = false
+local doorIsLocked = false
+local currentBangs = 0
+local bangInProgress = false
+
+-- Track current chaser from MainLogic
+local currentChaser = nil
+local allChasers = {}
+
+-- ProximityPrompts (defined globally so we can recreate them)
+local chestPrompt
+local keyPrompt
+local doorPrompt
+local bangPrompt
+
+local function setupChaserTracking()
+	local serverComm = ReplicatedStorage:FindFirstChild("ChaserUpdate")
+	if not serverComm then
+		serverComm = Instance.new("BindableEvent")
+		serverComm.Name = "ChaserUpdate"
+		serverComm.Parent = ReplicatedStorage
+		print("✅ Created ChaserUpdate BindableEvent")
+	end
+
+	serverComm.Event:Connect(function(chaser, allChasersTable)
+		currentChaser = chaser
+		allChasers = allChasersTable or {}
+		print("🚪 Door system updated chaser: " .. (chaser and chaser.Name or "None"))
+	end)
+end
+
+setupChaserTracking()
+
+-- Function to check if player is chaser
+local function isChaser(player)
+	local isChaserFunc = ReplicatedStorage:FindFirstChild("IsChaser")
+	if isChaserFunc then
+		local success, result = pcall(function()
+			return isChaserFunc:Invoke(player)
+		end)
+
+		if success then
+			return result
+		else
+			warn("⚠️ IsChaser invoke failed: " .. tostring(result))
+		end
+	else
+		warn("⚠️ IsChaser BindableFunction not found!")
+	end
+
+	if player.Character then
+		local chaserLight = player.Character:FindFirstChild("ChaserLight")
+		local chaserNameplate = player.Character:FindFirstChild("ChaserNameplate")
+
+		if chaserLight or chaserNameplate then
+			return true
+		end
+	end
+
+	return false
+end
+
+-- Function to update prompt visibility based on chaser status
+local function updateBangPromptVisibility()
+	if not doorIsLocked then
+		bangPrompt.Enabled = false
+		return
+	end
+
+	bangPrompt.Enabled = true
+end
+
+
+
+-- Function to open chest
+local function openChest()
+	if chestIsOpen then return end
+
+	print("🔓 Opening chest...")
+	chestIsOpen = true
+
+	local woodTopOpen = woodTopOriginal * CFrame.new(0, 0, 2) * CFrame.Angles(math.rad(OPEN_ROTATION), 0, 0)
+	local metalTopOpen = metalTopOriginal * CFrame.new(0, 0, 2) * CFrame.Angles(math.rad(OPEN_ROTATION), 0, 0)
+	local keyHoleOpen = woodTopOpen * keyHoleOffset
+
+	local woodTween = TweenService:Create(woodTop, tweenInfo, {CFrame = woodTopOpen})
+	local metalTween = TweenService:Create(metalTop, tweenInfo, {CFrame = metalTopOpen})
+	local keyHoleTween = TweenService:Create(keyHole, tweenInfo, {CFrame = keyHoleOpen})
+
+	woodTween:Play()
+	metalTween:Play()
+	keyHoleTween:Play()
+
+	chestPrompt.Enabled = false
+	keyPrompt.Enabled = true
+
+	print("✅ Chest opened! Key is now collectible.")
+end
+
+
+
+-- Function to collect key
+local function collectKey(player)
+	if keyCollected then return end
+
+	print("🔑 " .. player.Name .. " collecting key...")
+	keyCollected = true
+
+	keyPrompt.Enabled = false
+
+	local keyTool = Instance.new("Tool")
+	keyTool.Name = "Key"
+	keyTool.RequiresHandle = true
+	keyTool.CanBeDropped = false
+
+	local handle = keyMesh:Clone()
+	handle.Name = "Handle"
+	handle.Parent = keyTool
+
+	keyTool.Parent = player.Backpack
+
+	keyMesh.Transparency = 1 -- Hide instead of destroy (so we can reset it)
+	keyMesh.CanCollide = false
+
+	doorPrompt.Enabled = true
+
+	print("✅ " .. player.Name .. " collected the key! Door prompt enabled.")
+end
+
+-- Function to close door
+local function closeDoor(player)
+	if doorIsLocked then
+		warn("⚠️ Door is already locked!")
+		return
+	end
+
+	local character = player.Character
+	local backpack = player:FindFirstChild("Backpack")
+
+	if not character and not backpack then 
+		warn("⚠️ " .. player.Name .. " has no character or backpack!")
+		return 
+	end
+
+	local keyTool = character and character:FindFirstChild("Key")
+
+	if not keyTool and backpack then
+		keyTool = backpack:FindFirstChild("Key")
+	end
+
+	if not keyTool then
+		warn("⚠️ " .. player.Name .. " doesn't have the key!")
+		return
+	end
+
+	print("🚪 " .. player.Name .. " locking door with key...")
+
+	for part, offset in pairs(doorPartOffsets) do
+		local newCFrame = DOOR_CLOSED_CFRAME * offset
+		local partTween = TweenService:Create(part, tweenInfo, {
+			CFrame = newCFrame
+		})
+		partTween:Play()
+	end
+
+	keyTool:Destroy()
+
+	doorIsLocked = true
+	doorPrompt.Enabled = false
+	currentBangs = 0
+
+	updateBangPromptVisibility()
+
+	print("✅ Door locked! Key consumed.")
+end
+
+-- Function to handle chaser banging on door
+local function bangOnDoor(player)
+	if not doorIsLocked then
+		warn("⚠️ Door is already open!")
+		return
+	end
+
+	if bangInProgress then
+		warn("⚠️ Bang already in progress!")
+		return
+	end
+
+	if not isChaser(player) then
+		warn("⚠️ " .. player.Name .. " is not the chaser! Cannot bang on door.")
+		return
+	end
+
+	bangInProgress = true
+	currentBangs = currentBangs + 1
+
+	print("💥 " .. player.Name .. " (CHASER) banged on door! (" .. currentBangs .. "/" .. BANGS_REQUIRED .. ")")
+
+	if currentBangs < BANGS_REQUIRED then
+		bangPrompt.ActionText = "Bang on Door (" .. currentBangs .. "/" .. BANGS_REQUIRED .. ")"
+	end
+
+	if currentBangs >= BANGS_REQUIRED then
+		if doorKnockLastSound then
+			doorKnockLastSound:Play()
+		end
+	else
+		if doorKnockSound then
+			doorKnockSound:Play()
+		end
+	end
+
+	if currentBangs >= BANGS_REQUIRED then
+		print("🚪 Door broken open by chaser!")
+
+		for part, offset in pairs(doorPartOffsets) do
+			local newCFrame = DOOR_OPEN_CFRAME * offset
+			local partTween = TweenService:Create(part, tweenInfo, {
+				CFrame = newCFrame
+			})
+			partTween:Play()
+		end
+
+		doorIsLocked = false
+		currentBangs = 0
+		bangPrompt.Enabled = false
+		bangPrompt.ActionText = "Bang on Door"
+
+		print("✅ Door opened by chaser!")
+	end
+
+	task.wait(0.5)
+	bangInProgress = false
+end
+
+
+-- Function to create/recreate prompts
+local function createPrompts()
+	-- Destroy old prompts if they exist
+	if chestPrompt then chestPrompt:Destroy() end
+	if keyPrompt then keyPrompt:Destroy() end
+	if doorPrompt then doorPrompt:Destroy() end
+	if bangPrompt then bangPrompt:Destroy() end
+
+	-- Create chest prompt
+	chestPrompt = Instance.new("ProximityPrompt")
+	chestPrompt.ObjectText = "Chest"
+	chestPrompt.ActionText = "Open"
+	chestPrompt.RequiresLineOfSight = false
+	chestPrompt.MaxActivationDistance = 8
+	chestPrompt.Parent = keyHole
+
+	-- Create key prompt
+	keyPrompt = Instance.new("ProximityPrompt")
+	keyPrompt.ObjectText = "Key"
+	keyPrompt.ActionText = "Collect"
+	keyPrompt.RequiresLineOfSight = false
+	keyPrompt.MaxActivationDistance = 8
+	keyPrompt.Enabled = false
+	keyPrompt.Parent = keyMesh
+
+	-- Create door prompt
+	doorPrompt = Instance.new("ProximityPrompt")
+	doorPrompt.ObjectText = "Door"
+	doorPrompt.ActionText = "Lock with Key"
+	doorPrompt.RequiresLineOfSight = false
+	doorPrompt.MaxActivationDistance = 8
+	doorPrompt.Enabled = false
+	doorPrompt.Parent = doorPart
+
+	-- Create bang prompt
+	bangPrompt = Instance.new("ProximityPrompt")
+	bangPrompt.ObjectText = "Locked Door"
+	bangPrompt.ActionText = "Bang on Door"
+	bangPrompt.RequiresLineOfSight = false
+	bangPrompt.MaxActivationDistance = 8
+	bangPrompt.HoldDuration = BANG_DURATION
+	bangPrompt.Enabled = false
+	bangPrompt.Parent = doorPart
+
+	-- Connect events
+	chestPrompt.Triggered:Connect(function(player)
+		openChest()
+	end)
+
+	keyPrompt.Triggered:Connect(function(player)
+		collectKey(player)
+	end)
+
+	doorPrompt.Triggered:Connect(function(player)
+		closeDoor(player)
+	end)
+
+	bangPrompt.Triggered:Connect(function(player)
+		bangOnDoor(player)
+	end)
+
+	print("✅ ProximityPrompts created!")
+end
+
+
+
+-- NEW: Function to remove key from all players
+local function removeKeyFromAllPlayers()
+	for _, player in ipairs(Players:GetPlayers()) do
+		-- Check character (equipped)
+		if player.Character then
+			local keyTool = player.Character:FindFirstChild("Key")
+			if keyTool then
+				keyTool:Destroy()
+				print("🗑️ Removed key from " .. player.Name .. "'s character")
+			end
+		end
+
+		-- Check backpack (unequipped)
+		local backpack = player:FindFirstChild("Backpack")
+		if backpack then
+			local keyTool = backpack:FindFirstChild("Key")
+			if keyTool then
+				keyTool:Destroy()
+				print("🗑️ Removed key from " .. player.Name .. "'s backpack")
+			end
+		end
+
+		-- Also check StarterGear (in case it got there somehow)
+		local starterGear = player:FindFirstChild("StarterGear")
+		if starterGear then
+			local keyTool = starterGear:FindFirstChild("Key")
+			if keyTool then
+				keyTool:Destroy()
+				print("🗑️ Removed key from " .. player.Name .. "'s StarterGear")
+			end
+		end
+	end
+
+	print("✅ Key removal complete for all players")
+end
+
+-- NEW: Function to reset the entire system
+local function resetSystem()
+	print("🔄 Resetting Chest & Door System...")
+
+	-- Remove keys from all players FIRST
+	removeKeyFromAllPlayers()
+
+	-- Wait a moment to ensure tools are destroyed
+	task.wait(0.1)
+
+	-- Reset state variables
+	chestIsOpen = false
+	keyCollected = false
+	doorIsLocked = false
+	currentBangs = 0
+	bangInProgress = false
+
+	-- Close chest
+	woodTop.CFrame = woodTopOriginal
+	metalTop.CFrame = metalTopOriginal
+	keyHole.CFrame = keyHoleOriginal
+
+	-- IMPORTANT: Fully reset key mesh
+	keyMesh.CFrame = keyMeshOriginal
+	keyMesh.Transparency = 0
+	keyMesh.CanCollide = true
+	keyMesh.Anchored = true -- Ensure it stays in place
+
+	-- Open door
+	for part, offset in pairs(doorPartOffsets) do
+		part.CFrame = DOOR_OPEN_CFRAME * offset
+	end
+
+	-- Recreate prompts (this will enable chest prompt and disable key/door prompts)
+	createPrompts()
+
+	print("✅ Chest & Door System reset complete!")
+	print("   - Chest closed and ready")
+	print("   - Key returned to chest (visible and ready)")
+	print("   - Door open and ready")
+	print("   - All player keys removed")
+	print("   - Chest prompt enabled, key prompt disabled")
+end
+
+-- NEW: Listen for round end signal from MainLogic
+-- Replace the setupRoundEndListener function in your Map2 chest script with this:
+
+-- NEW: Listen for round end signal from MainLogic
+local function setupRoundEndListener()
+	-- Listen for ServerRoundEnd BindableEvent (server-to-server communication)
+	local serverRoundEnd = ReplicatedStorage:FindFirstChild("ServerRoundEnd")
+	if not serverRoundEnd then
+		-- Wait for it to be created by MainLogic
+		serverRoundEnd = ReplicatedStorage:WaitForChild("ServerRoundEnd", 30)
+	end
+
+	if serverRoundEnd and serverRoundEnd:IsA("BindableEvent") then
+		serverRoundEnd.Event:Connect(function()
+			print("📡 Chest System: Received round end signal - resetting...")
+			-- Small delay to let MainLogic finish cleanup first
+			task.wait(0.5)
+			resetSystem()
+		end)
+		print("✅ Listening for round end signals (ServerRoundEnd)")
+	else
+		warn("⚠️ ServerRoundEnd BindableEvent not found!")
+	end
+end
+
+-- Initialize system
+createPrompts()
+
+-- IMMEDIATE CONNECTION (don't wait for initialization)
+task.spawn(function()
+	task.wait(2) -- Wait for ReplicatedStorage to be ready
+
+	local serverRoundEnd = ReplicatedStorage:WaitForChild("ServerRoundEnd", 30)
+	if serverRoundEnd and serverRoundEnd:IsA("BindableEvent") then
+		serverRoundEnd.Event:Connect(function()
+			print("📡 Chest System: Received round end signal - resetting...")
+			task.wait(0.5)
+			resetSystem()
+		end)
+		print("✅ Chest System: Listening for ServerRoundEnd")
+	else
+		warn("⚠️ Chest System: ServerRoundEnd not found!")
+	end
+end)
+
+-- Initialize door as open at start
+for part, offset in pairs(doorPartOffsets) do
+	part.CFrame = DOOR_OPEN_CFRAME * offset
+end
+doorIsLocked = false
+bangPrompt.Enabled = false
+
+-- Setup round end listener
+setupRoundEndListener()
+
+-- Painting collision system setup
+local paintingModel = map2ChestFolder:FindFirstChild("Painting")
+
+if paintingModel then
+	local PhysicsService = game:GetService("PhysicsService")
+
+	local function createCollisionGroup(groupName)
+		local success = pcall(function()
+			PhysicsService:CreateCollisionGroup(groupName)
+		end)
+		if success then
+			print("✅ Created collision group: " .. groupName)
+		else
+			print("ℹ️ Collision group already exists: " .. groupName)
+		end
+	end
+
+	createCollisionGroup("Survivors")
+	createCollisionGroup("Chasers")
+	createCollisionGroup("Painting")
+
+	PhysicsService:CollisionGroupSetCollidable("Survivors", "Painting", false)
+	PhysicsService:CollisionGroupSetCollidable("Chasers", "Painting", true)
+
+	for _, part in ipairs(paintingModel:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CollisionGroup = "Painting"
+			part.CanCollide = true
+		end
+	end
+
+	local function updatePlayerCollisionGroup(player)
+		if not player.Character then return end
+
+		local isChaserStatus = isChaser(player)
+		local collisionGroup = isChaserStatus and "Chasers" or "Survivors"
+
+		for _, part in ipairs(player.Character:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.CollisionGroup = collisionGroup
+			end
+		end
+	end
+
+	local function updateAllPlayerCollisionGroups()
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.Character then
+				updatePlayerCollisionGroup(player)
+			end
+		end
+	end
+
+	local chaserUpdateListener = ReplicatedStorage:FindFirstChild("ChaserUpdate")
+	if chaserUpdateListener then
+		chaserUpdateListener.Event:Connect(function(chaser, allChasersTable)
+			currentChaser = chaser
+			allChasers = allChasersTable or {}
+			task.wait(0.5)
+			updateAllPlayerCollisionGroups()
+		end)
+	end
+
+	Players.PlayerAdded:Connect(function(player)
+		player.CharacterAdded:Connect(function(character)
+			task.wait(0.5)
+			updatePlayerCollisionGroup(player)
+		end)
+	end)
+
+	task.wait(2)
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character then
+			updatePlayerCollisionGroup(player)
+		end
+	end
+
+	print("✅ Painting collision system ready!")
+end
+
+print("✅ Chest & Door System Ready with Round Reset!")
+print("   - System will automatically reset at round end")
+print("   - Keys will be removed from all players")
+print("   - Chest and door will return to starting positions")
