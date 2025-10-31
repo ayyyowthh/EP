@@ -1,0 +1,1225 @@
+--[[
+	Map2EscapeSystem.lua
+	Handles the escape mechanic for Map2:
+	1. Collect 3 batteries
+	2. Power radio
+	3. Get flare from box
+	4. Place flare
+	5. Wait 15 seconds
+	6. Escape via helicopter
+]]
+
+local Map2EscapeSystem = {}
+
+
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+-- State tracking
+-- State tracking
+local isMap2Active = false
+local radioIsPowered = false
+local flareIsPlaced = false
+local helicopterIsActive = false
+local playerBatteryCount = {} -- {[UserId] = count}
+local playersEscaped = {} -- {[UserId] = true}
+local totalBatteriesInRadio = 0 -- ADD THIS LINE: Track total batteries deposited across all players
+
+-- References (will be set when map loads)
+local Map2Escape = nil
+local Batteries = {}
+local Flares = {}
+local FlarePlacePart = nil
+local Radio = nil
+local Helicopter = nil
+
+-- Settings
+local BATTERIES_NEEDED = 3
+local FLARE_WAIT_TIME = 15
+local HELICOPTER_ARRIVAL_TIME = 1 -- Time for helicopter to appear/spawn
+
+local MainLogicCleanup = nil -- Will be set by MainLogic
+
+function Map2EscapeSystem.SetCleanupFunction(cleanupFunc)
+	MainLogicCleanup = cleanupFunc
+	print("✅ Map2EscapeSystem: Cleanup function registered")
+end
+
+
+--[[
+	Initialize the escape system for Map2
+	Call this when Map2 is selected
+	FIXED: Don't re-initialize if already active
+]]
+function Map2EscapeSystem.Initialize()
+	-- If already initialized and helicopter exists, just reset and reuse
+	if isMap2Active and Helicopter and Helicopter.Parent then
+		print("🔄 Map2 already initialized, just resetting state...")
+
+		-- Reset state without destroying references
+		radioIsPowered = false
+		flareIsPlaced = false
+		helicopterIsActive = false
+		playerBatteryCount = {}
+		playersEscaped = {}
+		totalBatteriesInRadio = 0
+
+		return true
+	end
+
+	print("🗺️ Initializing Map2 Escape System...")
+
+	-- Find Map2Escape folder
+	Map2Escape = Workspace:FindFirstChild("Map2Escape")
+
+	if not Map2Escape then
+		warn("❌ Map2Escape folder not found in Workspace!")
+		return false
+	end
+
+	-- ✅ KEEP THIS: Clear existing arrays to prevent duplicates
+	Batteries = {}
+	Flares = {}
+
+	-- ✅ KEEP THIS: Get batteries
+	local batteriesFolder = Map2Escape:FindFirstChild("Batteries")
+	if batteriesFolder then
+		for i = 1, 3 do
+			local battery = batteriesFolder:FindFirstChild("Battery" .. i)
+			if battery then
+				table.insert(Batteries, battery)
+				setupBatteryPrompt(battery)
+			end
+		end
+		print("✅ Found " .. #Batteries .. " batteries")
+	else
+		warn("⚠️ Batteries folder not found!")
+	end
+
+	-- ✅ KEEP THIS: Get flares
+	local flaresFolder = Map2Escape:FindFirstChild("Flares")
+	if flaresFolder then
+		for i = 1, 7 do
+			local flare = flaresFolder:FindFirstChild("Flare" .. i)
+			if flare then
+				table.insert(Flares, flare)
+				setupFlarePrompt(flare)
+			end
+		end
+		print("✅ Found " .. #Flares .. " flares")
+	else
+		warn("⚠️ Flares folder not found!")
+	end
+
+	-- ✅ KEEP THIS: Get flare placement part
+	local flarePart = Map2Escape:FindFirstChild("FlarePart")
+	if flarePart then
+		FlarePlacePart = flarePart:FindFirstChild("Place")
+		if FlarePlacePart then
+			setupFlarePlacement()
+			print("✅ Flare placement area found")
+		end
+	end
+
+	-- ✅ KEEP THIS: Get radio
+	local radioFolder = Map2Escape:FindFirstChild("Radio")
+	if radioFolder then
+		Radio = radioFolder:FindFirstChild("RadioMesh")
+		if Radio then
+			setupRadioPrompt()
+			print("✅ Radio found")
+		end
+	end
+
+	-- ✅ NEW: Get helicopter with protection
+	if not Helicopter or not Helicopter.Parent then
+		local helicopterFolder = Map2Escape:FindFirstChild("Helicopter")
+		if helicopterFolder then
+			Helicopter = helicopterFolder:FindFirstChild("HelicopterModel")
+			if Helicopter then
+				-- ✅ PROTECT HELICOPTER FROM DELETION
+				Helicopter.Archivable = true
+
+				-- Ensure it stays in the workspace
+				if Helicopter.Parent ~= helicopterFolder then
+					Helicopter.Parent = helicopterFolder
+				end
+
+				print("✅ Helicopter found and protected from deletion")
+				print("🔍 Helicopter has " .. #Helicopter:GetDescendants() .. " parts at initialization")
+
+				-- Make ALL parts anchored and hidden initially
+				for _, part in ipairs(Helicopter:GetDescendants()) do
+					if part:IsA("BasePart") then
+						part.Anchored = true -- CRITICAL: Anchor it so it doesn't fall/move
+						part.CanCollide = false
+						part.Transparency = 1
+					end
+				end
+
+				-- ✅ ADD DEBUG TRACKER
+				Helicopter.AncestryChanged:Connect(function(child, parent)
+					if not parent then
+						warn("🚨 HELICOPTER WAS REMOVED FROM WORKSPACE!")
+						warn(debug.traceback())
+					end
+				end)
+			else
+				warn("❌ HelicopterModel not found!")
+			end
+		else
+			warn("❌ Helicopter folder not found!")
+		end
+	else
+		print("✅ Helicopter reference preserved from previous round")
+	end
+
+	isMap2Active = true
+	print("✅ Map2 Escape System initialized!")
+	return true
+end
+
+--[[
+	Spin helicopter rotor and add snow particle effects
+]]
+local rotorConnection = nil
+local particleEmitters = {}
+
+function startHelicopterEffects()
+	if not Helicopter then return end
+
+	print("🚁 Starting helicopter effects...")
+
+	-- Find the rotor to spin it
+	local rotor = Helicopter:FindFirstChild("Rotor1", true)
+	if rotor then
+		print("✅ Found Rotor1, starting spin...")
+
+		-- Spin the rotor continuously
+		rotorConnection = game:GetService("RunService").Heartbeat:Connect(function(dt)
+			if rotor and rotor.Parent then
+				-- Spin at realistic helicopter speed (about 300-400 RPM)
+				rotor.CFrame = rotor.CFrame * CFrame.Angles(0, math.rad(360 * dt * 5), 0)
+			else
+				-- Rotor was destroyed, stop spinning
+				if rotorConnection then
+					rotorConnection:Disconnect()
+					rotorConnection = nil
+				end
+			end
+		end)
+	else
+		warn("⚠️ Rotor1 not found in helicopter!")
+	end
+
+	-- Find and play helicopter sound
+	-- Find and play helicopter sound (search for ANY Sound in parent folder)
+	if Helicopter.Parent then
+		local helicopterSound = Helicopter.Parent:FindFirstChildOfClass("Sound")
+		if helicopterSound then
+			helicopterSound.Looped = true
+			helicopterSound:Play()
+			print("✅ Helicopter sound playing: " .. helicopterSound.Name)
+		else
+			warn("⚠️ No Sound found in Helicopter folder!")
+		end
+	end
+	-- Add snow particle effects FROM THE GROUND
+	if rotor then
+		print("✅ Adding ground snow effects...")
+
+		-- Ground detection and particle spawning loop
+		task.spawn(function()
+			local groundParticles = {} -- Track ground particle emitters
+
+			while helicopterIsActive and rotor and rotor.Parent do
+				task.wait(0.15)
+
+				-- Raycast downward from rotor to find ground
+				local rayOrigin = rotor.Position
+				local rayDirection = Vector3.new(0, -100, 0)
+
+				local raycastParams = RaycastParams.new()
+				raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+				raycastParams.FilterDescendantsInstances = {Helicopter}
+
+				local result = Workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+
+				if result and result.Distance < 35 then
+					-- Ground found within range!
+					local groundPosition = result.Position
+					local distance = result.Distance
+
+					-- Clean up old particles that are too far
+					for i = #groundParticles, 1, -1 do
+						local particleData = groundParticles[i]
+						if not particleData.part or not particleData.part.Parent then
+							table.remove(groundParticles, i)
+						elseif (particleData.part.Position - groundPosition).Magnitude > 30 then
+							-- Too far, clean up
+							particleData.part:Destroy()
+							table.remove(groundParticles, i)
+						end
+					end
+
+					-- Only create new particles if close enough and not too many already
+					if distance < 25 and #groundParticles < 8 then
+						-- Create particle emitters in a circle on the ground
+						local rotorRadius = 16
+						local numEmitters = 12
+
+						for i = 1, numEmitters do
+							local angle = (i / numEmitters) * math.pi * 2
+							local offsetX = math.cos(angle) * rotorRadius
+							local offsetZ = math.sin(angle) * rotorRadius
+
+							-- Create invisible part on ground for particles
+							local groundPart = Instance.new("Part")
+							groundPart.Name = "SnowEmitter"
+							groundPart.Size = Vector3.new(0.1, 0.1, 0.1)
+							groundPart.Position = groundPosition + Vector3.new(offsetX, 0.5, offsetZ)
+							groundPart.Anchored = true
+							groundPart.CanCollide = false
+							groundPart.Transparency = 1
+							groundPart.Parent = Workspace
+
+							-- Create attachment for particles
+							local attachment = Instance.new("Attachment")
+							attachment.Parent = groundPart
+
+							-- Snow being kicked up from ground
+							local particles = Instance.new("ParticleEmitter")
+							particles.Name = "GroundSnow"
+							particles.Texture = "rbxasset://textures/particles/smoke_main.dds"
+							particles.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
+							particles.LightEmission = 0.1
+							particles.LightInfluence = 1
+
+							-- Particle size - starts small, gets bigger
+							particles.Size = NumberSequence.new({
+								NumberSequenceKeypoint.new(0, 0.5),
+								NumberSequenceKeypoint.new(0.3, 2),
+								NumberSequenceKeypoint.new(1, 4)
+							})
+
+							particles.Transparency = NumberSequence.new({
+								NumberSequenceKeypoint.new(0, 0.5),
+								NumberSequenceKeypoint.new(0.5, 0.7),
+								NumberSequenceKeypoint.new(1, 1)
+							})
+
+							-- Emission - kicked up from ground
+							particles.Lifetime = NumberRange.new(1.5, 2.5)
+							particles.Rate = math.max(5, 25 - distance) -- More particles when closer
+							particles.Speed = NumberRange.new(8, 15)
+							particles.SpreadAngle = Vector2.new(20, 20)
+
+							-- Direction - outward and upward from ground
+							particles.EmissionDirection = Enum.NormalId.Top
+
+							-- Calculate direction away from helicopter center
+							local directionFromCenter = (groundPart.Position - groundPosition).Unit
+							particles.Acceleration = Vector3.new(
+								directionFromCenter.X * 5, -- Push outward
+								-3, -- Slight downward (gravity)
+								directionFromCenter.Z * 5  -- Push outward
+							)
+
+							particles.Drag = 4 -- Air resistance
+							particles.Rotation = NumberRange.new(0, 360)
+							particles.RotSpeed = NumberRange.new(-80, 80)
+
+							particles.Parent = attachment
+
+							-- Store reference
+							table.insert(groundParticles, {
+								part = groundPart,
+								emitter = particles
+							})
+						end
+					end
+
+					-- Adjust existing particle rates based on distance
+					for _, particleData in ipairs(groundParticles) do
+						if particleData.emitter and particleData.emitter.Parent then
+							if distance < 15 then
+								particleData.emitter.Rate = 25
+							elseif distance < 25 then
+								particleData.emitter.Rate = 15
+							else
+								particleData.emitter.Rate = 5
+							end
+						end
+					end
+				else
+					-- Too far from ground - clean up all particles
+					for _, particleData in ipairs(groundParticles) do
+						if particleData.part then
+							particleData.part:Destroy()
+						end
+					end
+					groundParticles = {}
+				end
+			end
+
+			-- Cleanup when helicopter leaves
+			for _, particleData in ipairs(groundParticles) do
+				if particleData.part then
+					particleData.part:Destroy()
+				end
+			end
+		end)
+
+		print("✅ Helicopter ground effects active!")
+	else
+		warn("⚠️ Rotor not found for ground effects!")
+	end
+end
+
+function stopHelicopterEffects()
+	print("🛑 Stopping helicopter effects...")
+
+	-- Stop rotor spinning
+	if rotorConnection then
+		rotorConnection:Disconnect()
+		rotorConnection = nil
+		print("✅ Rotor stopped spinning")
+	end
+
+	-- Stop helicopter sound (search for ANY Sound in parent folder)
+	if Helicopter and Helicopter.Parent then
+		local helicopterSound = Helicopter.Parent:FindFirstChildOfClass("Sound")
+		if helicopterSound then
+			helicopterSound:Stop()
+			print("✅ Helicopter sound stopped: " .. helicopterSound.Name)
+		end
+	end
+	
+
+	-- Clean up any ground particle parts
+	for _, obj in ipairs(Workspace:GetChildren()) do
+		if obj.Name == "SnowEmitter" then
+			obj:Destroy()
+		end
+	end
+
+	-- Clear particle emitter references
+	particleEmitters = {}
+
+	print("✅ Helicopter effects stopped")
+end
+
+
+
+
+function setupBatteryPrompt(battery)
+	-- Find or create ProximityPrompt (search descendants)
+	local prompt = battery:FindFirstChild("ProximityPrompt", true)
+	if not prompt then
+		-- Create new prompt and attach to a BasePart
+		prompt = Instance.new("ProximityPrompt")
+
+		-- Find a BasePart to attach to
+		local targetPart = battery.PrimaryPart or battery:FindFirstChildWhichIsA("BasePart")
+		if targetPart then
+			prompt.Parent = targetPart
+			print("✅ Created ProximityPrompt for battery on: " .. targetPart.Name)
+		else
+			warn("⚠️ Battery has no BasePart to attach prompt to!")
+			return
+		end
+	end
+
+	prompt.ActionText = "Collect Battery"
+	prompt.ObjectText = "Battery"
+	prompt.HoldDuration = 1
+	prompt.MaxActivationDistance = 8
+	prompt.Enabled = true
+
+	prompt.Triggered:Connect(function(player)
+		collectBattery(player, battery)
+	end)
+end
+
+
+
+--[[
+	Handle battery collection - Give as Tool
+]]
+function collectBattery(player, battery)
+	if not isMap2Active then return end
+
+	-- Initialize player's battery count
+	if not playerBatteryCount[player.UserId] then
+		playerBatteryCount[player.UserId] = 0
+	end
+
+	-- Check if player already has 3 batteries
+	if playerBatteryCount[player.UserId] >= BATTERIES_NEEDED then
+		print("⚠️ " .. player.Name .. " already has 3 batteries!")
+		return
+	end
+
+	-- Create battery tool
+	local batteryTool = Instance.new("Tool")
+	batteryTool.Name = "Battery"
+	batteryTool.RequiresHandle = false
+	batteryTool.CanBeDropped = false
+
+	-- Add to player backpack
+	batteryTool.Parent = player:FindFirstChild("Backpack")
+
+	-- Add battery count
+	playerBatteryCount[player.UserId] = playerBatteryCount[player.UserId] + 1
+
+	-- Reset batteries
+	for _, battery in ipairs(Batteries) do
+		for _, part in ipairs(battery:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.Transparency = 0
+				part.CanCollide = true
+			end
+		end
+		local prompt = battery:FindFirstChild("ProximityPrompt", true)
+		if prompt then
+			prompt.Enabled = true
+		end
+	end
+	
+	local prompt = battery:FindFirstChild("ProximityPrompt", true)
+	if prompt then
+		prompt.Enabled = false
+	end
+
+	print("🔋 " .. player.Name .. " collected battery! (" .. playerBatteryCount[player.UserId] .. "/" .. BATTERIES_NEEDED .. ")")
+
+	-- Notify player
+	local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+	if updateStatusEvent then
+		updateStatusEvent:FireClient(player, "🔋 Battery collected! (" .. playerBatteryCount[player.UserId] .. "/" .. BATTERIES_NEEDED .. ")", false)
+	end
+
+	-- Check if player has all batteries
+	if playerBatteryCount[player.UserId] >= BATTERIES_NEEDED then
+		local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+		if updateStatusEvent then
+			updateStatusEvent:FireClient(player, "✅ All batteries collected! Take them to the radio!", false)
+		end
+	end
+end
+
+--[[
+	Setup radio interaction prompt
+]]
+function setupRadioPrompt()
+	local prompt = Radio:FindFirstChild("ProximityPrompt")
+	if not prompt then
+		prompt = Instance.new("ProximityPrompt")
+		prompt.Parent = Radio
+	end
+
+	prompt.ActionText = "Power Radio"
+	prompt.ObjectText = "Radio"
+	prompt.HoldDuration = 2
+	prompt.MaxActivationDistance = 8
+	prompt.Enabled = true
+
+	prompt.Triggered:Connect(function(player)
+		powerRadio(player)
+	end)
+end
+
+--[[
+	Power the radio with batteries - Removes battery tools from inventory
+]]
+--[[
+	Power the radio with batteries - Removes battery tools from inventory
+	FIXED: Now tracks total batteries across all players
+]]
+function powerRadio(player)
+	if not isMap2Active then return end
+	if radioIsPowered then
+		print("⚠️ Radio is already powered!")
+		return
+	end
+
+	-- Count how many battery tools player has
+	local backpack = player:FindFirstChild("Backpack")
+	local character = player.Character
+	local batteryCount = 0
+
+	if backpack then
+		for _, item in ipairs(backpack:GetChildren()) do
+			if item:IsA("Tool") and item.Name == "Battery" then
+				batteryCount = batteryCount + 1
+			end
+		end
+	end
+
+	if character then
+		for _, item in ipairs(character:GetChildren()) do
+			if item:IsA("Tool") and item.Name == "Battery" then
+				batteryCount = batteryCount + 1
+			end
+		end
+	end
+
+	if batteryCount == 0 then
+		local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+		if updateStatusEvent then
+			updateStatusEvent:FireClient(player, "❌ You don't have any batteries!", false)
+		end
+		return
+	end
+
+	-- NEW: Check if adding these batteries would exceed the limit
+	if totalBatteriesInRadio + batteryCount > BATTERIES_NEEDED then
+		local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+		if updateStatusEvent then
+			local remaining = BATTERIES_NEEDED - totalBatteriesInRadio
+			updateStatusEvent:FireClient(player, "❌ Radio only needs " .. remaining .. " more battery(ies)!", false)
+		end
+		return
+	end
+
+	-- Remove battery tools
+	local batteriesRemoved = 0
+	if backpack then
+		for _, item in ipairs(backpack:GetChildren()) do
+			if item:IsA("Tool") and item.Name == "Battery" then
+				item:Destroy()
+				batteriesRemoved = batteriesRemoved + 1
+			end
+		end
+	end
+
+	if character then
+		for _, item in ipairs(character:GetChildren()) do
+			if item:IsA("Tool") and item.Name == "Battery" then
+				item:Destroy()
+				batteriesRemoved = batteriesRemoved + 1
+			end
+		end
+	end
+
+	-- NEW: Add batteries to radio total
+	totalBatteriesInRadio = totalBatteriesInRadio + batteriesRemoved
+	playerBatteryCount[player.UserId] = 0
+
+	print("📻 " .. player.Name .. " added " .. batteriesRemoved .. " batteries! Total: " .. totalBatteriesInRadio .. "/" .. BATTERIES_NEEDED)
+
+	-- Update radio prompt text to show progress
+	local prompt = Radio:FindFirstChild("ProximityPrompt")
+	if prompt then
+		prompt.ObjectText = "Radio (" .. totalBatteriesInRadio .. "/" .. BATTERIES_NEEDED .. ")"
+	end
+
+	-- Notify all players
+	local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+	if updateStatusEvent then
+		updateStatusEvent:FireAllClients("🔋 " .. player.Name .. " added " .. batteriesRemoved .. " batteries! (" .. totalBatteriesInRadio .. "/" .. BATTERIES_NEEDED .. ")", false)
+	end
+
+	-- Check if radio is fully powered
+	if totalBatteriesInRadio >= BATTERIES_NEEDED then
+		radioIsPowered = true
+
+		print("📻 Radio is now fully powered!")
+
+		-- Notify all players
+		if updateStatusEvent then
+			updateStatusEvent:FireAllClients("📻 Radio powered! Flares are now available!", false)
+		end
+
+		-- Disable radio prompt
+		if prompt then
+			prompt.Enabled = false
+		end
+
+		-- Enable all flare prompts
+		for _, flare in ipairs(Flares) do
+			local flarePrompt = flare:FindFirstChild("ProximityPrompt", true)
+			if flarePrompt then
+				flarePrompt.Enabled = true
+			end
+		end
+	end
+end
+
+--[[
+	Setup flare collection prompt
+]]
+function setupFlarePrompt(flare)
+	-- Find or create ProximityPrompt (search descendants)
+	local prompt = flare:FindFirstChild("ProximityPrompt", true)
+	if not prompt then
+		-- Create new prompt and attach to a BasePart
+		prompt = Instance.new("ProximityPrompt")
+
+		-- Find a BasePart to attach to
+		local targetPart = flare.PrimaryPart or flare:FindFirstChildWhichIsA("BasePart")
+		if targetPart then
+			prompt.Parent = targetPart
+			print("✅ Created ProximityPrompt for flare on: " .. targetPart.Name)
+		else
+			warn("⚠️ Flare has no BasePart to attach prompt to!")
+			return
+		end
+	end
+
+	prompt.ActionText = "Take Flare"
+	prompt.ObjectText = "Flare"
+	prompt.HoldDuration = 1
+	prompt.MaxActivationDistance = 8
+	prompt.Enabled = false -- Disabled until radio is powered
+
+	prompt.Triggered:Connect(function(player)
+		collectFlare(player, flare)
+	end)
+end
+--[[
+	Handle flare collection
+]]
+function collectFlare(player, flare)
+	if not isMap2Active then return end
+	if not radioIsPowered then
+		print("⚠️ Radio must be powered first!")
+		return
+	end
+
+	-- Check if player already has a flare TOOL
+	local backpack = player:FindFirstChild("Backpack")
+	local character = player.Character
+	local hasFlare = false
+
+	if backpack and backpack:FindFirstChild("Flare") then
+		hasFlare = true
+	end
+
+	if character and character:FindFirstChild("Flare") then
+		hasFlare = true
+	end
+
+	if hasFlare then
+		print("⚠️ " .. player.Name .. " already has a flare!")
+		local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+		if updateStatusEvent then
+			updateStatusEvent:FireClient(player, "❌ You already have a flare!", false)
+		end
+		return
+	end
+
+	-- Create flare tool
+	local flareTool = Instance.new("Tool")
+	flareTool.Name = "Flare"
+	flareTool.RequiresHandle = false
+	flareTool.CanBeDropped = false
+
+	-- Add to player backpack
+	flareTool.Parent = player:FindFirstChild("Backpack")
+
+	-- Hide flare in world
+	for _, part in ipairs(flare:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.Transparency = 1
+			part.CanCollide = false
+		end
+	end
+
+	local prompt = flare:FindFirstChild("ProximityPrompt", true)
+	if prompt then
+		prompt.Enabled = false
+	end
+
+	print("🔦 " .. player.Name .. " collected a flare!")
+
+	-- Notify player
+	local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+	if updateStatusEvent then
+		updateStatusEvent:FireClient(player, "🔦 Flare collected! Place it at the designated area!", false)
+	end
+end
+
+--[[
+	Setup flare placement area
+]]
+function setupFlarePlacement()
+	local prompt = FlarePlacePart:FindFirstChild("ProximityPrompt")
+	if not prompt then
+		prompt = Instance.new("ProximityPrompt")
+		prompt.Parent = FlarePlacePart
+	end
+
+	prompt.ActionText = "Place Flare"
+	prompt.ObjectText = "Flare Area"
+	prompt.HoldDuration = 2
+	prompt.MaxActivationDistance = 10
+
+	prompt.Triggered:Connect(function(player)
+		placeFlare(player)
+	end)
+end
+
+--[[
+	Place flare and call helicopter
+]]
+function placeFlare(player)
+	if not isMap2Active then return end
+	if flareIsPlaced then
+		print("⚠️ Flare already placed!")
+		return
+	end
+
+	-- Check if player has a flare TOOL
+	local backpack = player:FindFirstChild("Backpack")
+	local character = player.Character
+	local flareTool = nil
+
+	if backpack then
+		flareTool = backpack:FindFirstChild("Flare")
+	end
+
+	if not flareTool and character then
+		flareTool = character:FindFirstChild("Flare")
+	end
+
+	if not flareTool then
+		local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+		if updateStatusEvent then
+			updateStatusEvent:FireClient(player, "❌ You need a flare first!", false)
+		end
+		return
+	end
+
+	-- Remove the flare tool
+	flareTool:Destroy()
+
+	-- Place flare!
+	flareIsPlaced = true
+
+	print("🔥 " .. player.Name .. " placed the flare!")
+
+	-- Notify all players
+	local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+	if updateStatusEvent then
+		updateStatusEvent:FireAllClients("🔥 Flare placed! Helicopter arriving in " .. FLARE_WAIT_TIME .. " seconds!", false)
+	end
+
+	-- Disable flare placement
+	local prompt = FlarePlacePart:FindFirstChild("ProximityPrompt")
+	if prompt then
+		prompt.Enabled = false
+	end
+
+	-- Countdown and spawn helicopter
+	task.spawn(function()
+		for i = FLARE_WAIT_TIME, 1, -1 do
+			task.wait(1)
+			if i <= 5 then
+				local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+				if updateStatusEvent then
+					updateStatusEvent:FireAllClients("🚁 Helicopter arriving in " .. i .. "...", false)
+				end
+			end
+		end
+
+		-- Spawn helicopter
+		spawnHelicopter()
+	end)
+end
+
+--[[
+	Spawn/activate helicopter
+]]
+--[[
+	Spawn/activate helicopter
+]]
+function spawnHelicopter()
+	if not Helicopter then
+		warn("❌ Helicopter model not found!")
+		return
+	end
+
+	print("🚁 Helicopter arriving!")
+
+	-- Find MeshPartMain and set it as PrimaryPart
+	local meshPartMain = Helicopter:FindFirstChild("MeshPartMain", true)
+	if meshPartMain then
+		Helicopter.PrimaryPart = meshPartMain
+		print("✅ Set MeshPartMain as PrimaryPart")
+	else
+		warn("❌ MeshPartMain not found for PrimaryPart!")
+	end
+
+	-- Make helicopter visible
+	print("🔍 Making helicopter visible...")
+	local partsFound = 0
+	for _, part in ipairs(Helicopter:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.Transparency = 0
+			part.CanCollide = true
+			part.Anchored = true -- ✅ Keep anchored!
+			partsFound = partsFound + 1
+		end
+	end
+	print("✅ Made " .. partsFound .. " helicopter parts visible!")
+
+	helicopterIsActive = true
+
+	-- ✅ START EFFECTS
+	startHelicopterEffects()
+
+	-- Notify players
+	local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+	if updateStatusEvent then
+		updateStatusEvent:FireAllClients("🚁 HELICOPTER HAS ARRIVED! ESCAPE NOW!", false)
+	end
+
+	-- Setup escape detection
+	setupHelicopterEscape()
+end
+--[[
+	Setup helicopter escape detection
+]]
+--[[
+	Find closest matching child by name (fuzzy search) - HELICOPTER ONLY
+]]
+local function findClosestHelicopterChild(parent, targetName)
+	if not parent then return nil end
+
+	-- First try exact match
+	local exactMatch = parent:FindFirstChild(targetName)
+	if exactMatch then return exactMatch end
+
+	-- Try case-insensitive match
+	targetName = targetName:lower()
+	local bestMatch = nil
+	local bestScore = math.huge
+
+	for _, child in ipairs(parent:GetChildren()) do
+		local childName = child.Name:lower()
+
+		-- Check if target is contained in child name
+		if childName:find(targetName) then
+			local score = math.abs(#childName - #targetName)
+			if score < bestScore then
+				bestScore = score
+				bestMatch = child
+			end
+		end
+
+		-- Check if child name is contained in target
+		if targetName:find(childName) then
+			local score = math.abs(#childName - #targetName)
+			if score < bestScore then
+				bestScore = score
+				bestMatch = child
+			end
+		end
+	end
+
+	if bestMatch then
+		print("🔍 Helicopter: Found closest match for '" .. targetName .. "': " .. bestMatch.Name)
+		return bestMatch
+	end
+
+	return nil
+end
+
+--[[
+	Setup helicopter escape detection
+]]
+--[[
+	Setup helicopter escape detection
+]]
+function setupHelicopterEscape()
+	if not Helicopter then 
+		warn("❌ Helicopter is nil!")
+		return 
+	end
+
+	print("🔍 Helicopter exists. Checking structure...")
+	print("🔍 Helicopter class: " .. Helicopter.ClassName)
+	print("🔍 Helicopter name: " .. Helicopter.Name)
+	print("🔍 Helicopter parent: " .. tostring(Helicopter.Parent))
+
+	-- List ALL descendants (deep search)
+	local descendants = Helicopter:GetDescendants()
+	print("🔍 Total descendants count: " .. #descendants)
+
+	if #descendants == 0 then
+		warn("❌ Helicopter has NO parts inside! Check your workspace hierarchy.")
+		print("🔍 Helicopter direct children count: " .. #Helicopter:GetChildren())
+		for i, child in ipairs(Helicopter:GetChildren()) do
+			print("   Child " .. i .. ": " .. child.Name .. " (" .. child.ClassName .. ")")
+		end
+		return
+	end
+
+	-- List ALL descendants (not just 10)
+	print("🔍 ALL descendants:")
+	for i, desc in ipairs(descendants) do
+		print("   " .. i .. ". " .. desc.Name .. " (" .. desc.ClassName .. ")")
+	end
+
+	-- Find MeshPartMain with multiple methods
+	print("🔍 Attempting to find MeshPartMain...")
+
+	-- Method 1: Direct search
+	local meshPartMain = Helicopter:FindFirstChild("MeshPartMain")
+	if meshPartMain then
+		print("✅ Found via direct search!")
+	else
+		print("❌ Not found via direct search")
+	end
+
+	-- Method 2: Recursive search
+	if not meshPartMain then
+		meshPartMain = Helicopter:FindFirstChild("MeshPartMain", true)
+		if meshPartMain then
+			print("✅ Found via recursive search!")
+		else
+			print("❌ Not found via recursive search")
+		end
+	end
+
+	-- Method 3: Manual loop through descendants
+	if not meshPartMain then
+		for _, desc in ipairs(descendants) do
+			print("   Checking: " .. desc.Name .. " == 'MeshPartMain'? " .. tostring(desc.Name == "MeshPartMain"))
+			if desc.Name == "MeshPartMain" then
+				meshPartMain = desc
+				print("✅ Found via manual loop!")
+				break
+			end
+		end
+	end
+
+	-- Method 4: Find ANY MeshPart
+	if not meshPartMain then
+		print("🔍 Searching for ANY MeshPart...")
+		for _, desc in ipairs(descendants) do
+			if desc:IsA("MeshPart") then
+				print("   Found MeshPart: " .. desc.Name)
+				meshPartMain = desc
+				break
+			end
+		end
+	end
+
+	if not meshPartMain then
+		warn("❌ MeshPartMain not found by ANY method!")
+		return
+	end
+
+	print("✅ Using part: " .. meshPartMain.Name .. " (" .. meshPartMain.ClassName .. ")")
+
+	-- Create ProximityPrompt for escape
+	local escapePrompt = meshPartMain:FindFirstChild("ProximityPrompt")
+	if not escapePrompt then
+		escapePrompt = Instance.new("ProximityPrompt")
+		escapePrompt.Parent = meshPartMain
+	end
+
+	escapePrompt.ActionText = "Escape"
+	escapePrompt.ObjectText = "Helicopter"
+	escapePrompt.HoldDuration = 2
+	escapePrompt.MaxActivationDistance = 15
+	escapePrompt.Enabled = true
+
+	escapePrompt.Triggered:Connect(function(player)
+		handleEscape(player)
+	end)
+
+	print("✅ Helicopter escape detection active on " .. meshPartMain.Name .. "!")
+end
+
+
+function handleEscape(player)
+	if not isMap2Active then return end
+	if not helicopterIsActive then return end
+	if playersEscaped[player.UserId] then return end
+
+	-- Check if player is chaser
+	local isChaserFunc = ReplicatedStorage:FindFirstChild("IsChaser")
+	if isChaserFunc then
+		local isPlayerChaser = isChaserFunc:Invoke(player)
+		if isPlayerChaser then
+			print("🚫 " .. player.Name .. " is a chaser - cannot escape!")
+			return
+		end
+	end
+
+	-- Mark player as escaped
+	playersEscaped[player.UserId] = true
+
+	print("✅ " .. player.Name .. " ESCAPED via helicopter!")
+
+	-- ✅ Clean up effects using MainLogic's cleanup function
+	if MainLogicCleanup and player.Character then
+		MainLogicCleanup(player)
+		print("🧹 Cleaned up effects for escaped player: " .. player.Name)
+	else
+		warn("⚠️ MainLogicCleanup function not registered!")
+	end
+
+	-- Notify all players
+	local updateStatusEvent = ReplicatedStorage:FindFirstChild("UpdateStatus")
+	if updateStatusEvent then
+		updateStatusEvent:FireAllClients("✈️ " .. player.Name .. " ESCAPED!", false)
+	end
+
+	-- Teleport to lobby
+	local Maps = Workspace:FindFirstChild("Maps")
+	if Maps then
+		local SpawnPoints = Maps:FindFirstChild("SpawnPoints")
+		if SpawnPoints then
+			local LobbySpawn = SpawnPoints:FindFirstChild("Lobby")
+			if LobbySpawn and player.Character then
+				local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+				if hrp then
+					hrp.CFrame = LobbySpawn.CFrame + Vector3.new(0, 3, 0)
+					print("🏠 " .. player.Name .. " teleported to lobby after escape")
+				end
+			end
+		end
+	end
+end
+--[[
+	Check if game should end based on escapes
+	NOTE: This just prints info - MainLogic handles the actual win condition
+]]
+function checkEscapeWinCondition()
+	-- Just log status - don't end game here
+	-- MainLogic's checkMap2EscapeWinCondition() handles the actual win condition
+	local escapedCount = Map2EscapeSystem.GetEscapedCount()
+	print("🚁 Player escaped! Total escaped: " .. escapedCount)
+end
+
+--[[
+	Reset the escape system (call when round ends)
+]]
+--[[
+	Reset the escape system (call when round ends)
+	FIXED: Properly handle Model-based batteries and flares
+]]
+--[[
+	Reset the escape system (call when round ends)
+	FIXED: Don't set isMap2Active to false - just reset state
+]]
+function Map2EscapeSystem.Reset()
+	print("🔄 Resetting Map2 Escape System...")
+
+	-- ✅ STOP EFFECTS FIRST
+	stopHelicopterEffects()
+
+	-- Reset state variables
+	radioIsPowered = false
+	flareIsPlaced = false
+	helicopterIsActive = false
+	playerBatteryCount = {}
+	playersEscaped = {}
+	totalBatteriesInRadio = 0
+
+
+
+
+	-- Reset batteries
+	for _, battery in ipairs(Batteries) do
+		for _, part in ipairs(battery:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.Transparency = 0
+				part.CanCollide = true
+			end
+		end
+
+		local prompt = battery:FindFirstChild("ProximityPrompt", true)
+		if prompt then
+			prompt.Enabled = true
+		end
+	end
+
+	-- Reset flares
+	for _, flare in ipairs(Flares) do
+		for _, part in ipairs(flare:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.Transparency = 0
+				part.CanCollide = true
+			end
+		end
+		local prompt = flare:FindFirstChild("ProximityPrompt", true)
+		if prompt then
+			prompt.Enabled = false -- Disabled until radio powered
+		end
+	end
+
+	-- Reset radio
+	if Radio then
+		local prompt = Radio:FindFirstChild("ProximityPrompt")
+		if prompt then
+			prompt.Enabled = true
+			prompt.ObjectText = "Radio (0/" .. BATTERIES_NEEDED .. ")"
+		end
+	end
+
+	-- Reset flare placement
+	if FlarePlacePart then
+		local prompt = FlarePlacePart:FindFirstChild("ProximityPrompt")
+		if prompt then
+			prompt.Enabled = true
+		end
+	end
+
+	-- CRITICAL: Check if helicopter still exists
+	print("🔍 Checking helicopter during reset...")
+	if Helicopter and Helicopter.Parent then
+		print("✅ Helicopter exists, hiding it...")
+		local hiddenCount = 0
+		for _, part in ipairs(Helicopter:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.Transparency = 1
+				part.CanCollide = false
+				hiddenCount = hiddenCount + 1
+			end
+		end
+		print("✅ Hidden " .. hiddenCount .. " helicopter parts")
+
+		-- Disable the escape prompt
+		local escapePrompt = Helicopter:FindFirstChild("ProximityPrompt", true)
+		if escapePrompt then
+			escapePrompt.Enabled = false
+			print("✅ Disabled helicopter escape prompt")
+		end
+	else
+		warn("⚠️ Helicopter reference lost! Will re-find on next Initialize()")
+		Helicopter = nil -- Clear the reference so Initialize() can find it again
+	end
+
+	-- DON'T set isMap2Active to false here - keep it true between rounds
+	-- Only set to false when we actually want to disable the system completely
+
+	print("✅ Map2 Escape System reset complete! (System remains active)")
+end
+--[[
+	Check if a player has escaped
+]]
+function Map2EscapeSystem.HasPlayerEscaped(player)
+	return playersEscaped[player.UserId] == true
+end
+
+--[[
+	Get count of players who escaped
+]]
+function Map2EscapeSystem.GetEscapedCount()
+	local count = 0
+	for _, escaped in pairs(playersEscaped) do
+		if escaped then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+return Map2EscapeSystem
